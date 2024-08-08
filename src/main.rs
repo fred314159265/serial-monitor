@@ -370,6 +370,7 @@ fn usb_port_matches(port: &SerialPortInfo, opt: &Opt) -> bool {
 /// Get the destination of a symlink if the port name is indeed a path to a symlink.
 ///
 /// If not a symlink, then will return the `port_name` untouched.
+#[cfg(target_family = "unix")]
 fn get_port_path(port_name: &str) -> String {
     let port_path = std::path::PathBuf::from(port_name);
     if let (true, Ok(link_target)) = (port_path.is_symlink(), std::fs::read_link(&port_path)) {
