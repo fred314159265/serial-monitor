@@ -265,13 +265,13 @@ fn hex_str(bytes: &[u8]) -> String {
 }
 
 // Checks to see if a string matches a pattern used for filtering.
-fn matches(str: &str, pattern: Option<String>, opt: &Opt) -> bool {
-    let result = match pattern.clone() {
+fn matches(str: &str, pattern: Option<&str>, opt: &Opt) -> bool {
+    let result = match pattern {
         Some(pattern) => {
             if pattern.contains('*') || pattern.contains('?') {
                 // If any wildcards are present, then we assume that the
                 // pattern is fully specified
-                WildMatch::new(&pattern).matches(str)
+                WildMatch::new(pattern).matches(str)
             } else {
                 // Since no wildcard were specified we treat it as if there
                 // was a '*' at each end.
@@ -294,7 +294,7 @@ fn matches(str: &str, pattern: Option<String>, opt: &Opt) -> bool {
 }
 
 // Similar to matches but checks to see if an Option<String> matches a pattern.
-fn matches_opt(str: Option<String>, pattern: Option<String>, opt: &Opt) -> bool {
+fn matches_opt(str: Option<String>, pattern: Option<&str>, opt: &Opt) -> bool {
     if let Some(str) = str {
         matches(&str, pattern, opt)
     } else {
@@ -347,18 +347,41 @@ fn available_ports() -> Result<Vec<SerialPortInfo>> {
 
 // Checks to see if a serial port matches the filtering criteria specified on the command line.
 fn usb_port_matches(port: &SerialPortInfo, opt: &Opt) -> bool {
+    #[cfg(target_family = "unix")]
+    // Handle symlinks if on unix.
+    let user_port_name = opt.port.as_deref().map(get_port_path);
+    #[cfg(not(target_family = "unix"))]
+    let user_port_name = opt.port.clone();
+
     if let SerialPortType::UsbPort(info) = &port.port_type {
-        if matches(&port.port_name, opt.port.clone(), opt)
-            && matches(&format!("{:04x}", info.vid), opt.vid.clone(), opt)
-            && matches(&format!("{:04x}", info.pid), opt.pid.clone(), opt)
-            && matches_opt(info.manufacturer.clone(), opt.manufacturer.clone(), opt)
-            && matches_opt(info.serial_number.clone(), opt.serial.clone(), opt)
-            && matches_opt(info.product.clone(), opt.product.clone(), opt)
+        if matches(&port.port_name, user_port_name.as_deref(), opt)
+            && matches(&format!("{:04x}", info.vid), opt.vid.as_deref(), opt)
+            && matches(&format!("{:04x}", info.pid), opt.pid.as_deref(), opt)
+            && matches_opt(info.manufacturer.clone(), opt.manufacturer.as_deref(), opt)
+            && matches_opt(info.serial_number.clone(), opt.serial.as_deref(), opt)
+            && matches_opt(info.product.clone(), opt.product.as_deref(), opt)
         {
             return true;
         }
     }
     false
+}
+
+/// Get the destination of a symlink if the port name is indeed a path to a symlink.
+///
+/// If not a symlink, then will return the `port_name` untouched.
+fn get_port_path(port_name: &str) -> String {
+    let port_path = std::path::PathBuf::from(port_name);
+    if let (true, Ok(link_target)) = (port_path.is_symlink(), std::fs::read_link(&port_path)) {
+        if link_target.is_relative() {
+            if let Ok(new_path) = port_path.parent().unwrap().join(link_target).canonicalize() {
+                return new_path.to_string_lossy().to_string();
+            }
+        } else {
+            return link_target.to_string_lossy().to_string();
+        }
+    }
+    port_name.to_owned()
 }
 
 fn filtered_ports(opt: &Opt) -> Result<Vec<SerialPortInfo>> {
