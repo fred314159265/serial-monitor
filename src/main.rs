@@ -544,12 +544,15 @@ async fn monitor(port: &mut tokio_serial::SerialStream, opt: &Opt) -> Result<()>
                         if event == exit_code {
                             break;
                         }
-                        if let Event::Key(key_event) = event {
-                            if let Some(key) = handle_key_event(key_event, opt)? {
-                                serial_writer.unbounded_send(key).unwrap();
+                        match event {
+                            Event::Key(key_event) => {
+                                if let Some(key) = handle_key_event(key_event, opt)? {
+                                    serial_writer.unbounded_send(key).unwrap();
+                                }
                             }
-                        } else {
-                            println!("Unrecognized Event::{:?}\r", event);
+                            // Ignore resizing.
+                            Event::Resize(_, _) => (),
+                            _ => println!("Unrecognized Event::{:?}\r", event),
                         }
                     }
                     Some(Err(e)) => println!("crossterm Error: {:?}\r", e),
