@@ -114,10 +114,7 @@ impl TryFrom<usize> for DataBitsOpt {
             6 => Ok(Self(DataBits::Six)),
             7 => Ok(Self(DataBits::Seven)),
             8 => Ok(Self(DataBits::Eight)),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "databits out of range",
-            )),
+            _ => Err(io::Error::other("databits out of range")),
         }
     }
 }
@@ -174,10 +171,7 @@ impl TryFrom<usize> for StopBitsOpt {
         match value {
             1 => Ok(Self(StopBits::One)),
             2 => Ok(Self(StopBits::Two)),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "stopbits out of range",
-            )),
+            _ => Err(io::Error::other("stopbits out of range")),
         }
     }
 }

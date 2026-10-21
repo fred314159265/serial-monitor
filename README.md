@@ -41,6 +41,28 @@ cargo install --path .
 ```
 This will build `serial-monitor` and install it into `~/.cargo/bin`
 
+Prebuilt binaries
+=================
+
+Nightly builds from `master` are published as a prerelease and replaced on every push to that branch:
+
+<https://github.com/fred314159265/serial-monitor/releases/tag/nightly>
+
+Versioned releases, created by pushing a `vX.Y.Z` tag, are listed at:
+
+<https://github.com/fred314159265/serial-monitor/releases>
+
+Each release contains archives for Linux x86_64, Windows x64, macOS Apple Silicon, and macOS Intel, plus a `SHA256SUMS` file. An archive contains the `serial-monitor` binary and the MIT license. The Linux binary needs `libudev.so.1` at runtime, which typical desktop and server distributions already provide.
+
+Check a download with:
+
+```
+sha256sum -c SHA256SUMS
+gh attestation verify serial-monitor-nightly-x86_64-unknown-linux-gnu.tar.gz --repo fred314159265/serial-monitor
+```
+
+The binaries are unsigned. Windows SmartScreen and macOS Gatekeeper will warn when you run them.
+
 Usage
 =====
 
