@@ -55,7 +55,14 @@ impl Decoder for StringDecoder {
                 let (ref mut index, ref mut buf) = self.incomplete;
 
                 // Index is always less than 4, because of below.
-                buf[*index] = src.split_to(1).get(0).unwrap_or_default();
+                // `split_to(1)` panics when `src` is empty, and indexing the
+                // result panics if that split is empty. Upstream's
+                // `.get(0).unwrap_or_default()` does not compile: `get` yields
+                // `&u8`, which has no `Default`.
+                if src.is_empty() {
+                    return Ok(None);
+                }
+                buf[*index] = src.split_to(1)[0];
                 *index += 1;
 
                 // Check if char is valid
@@ -98,5 +105,78 @@ impl Decoder for StringDecoder {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StringDecoder;
+    use tokio_util::bytes::BytesMut;
+    use tokio_util::codec::Decoder;
+
+    fn decode_chunks(chunks: &[&[u8]]) -> Vec<String> {
+        let mut decoder = StringDecoder::new();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            let mut src = BytesMut::from(*chunk);
+            let mut spins = 0;
+            while !src.is_empty() {
+                spins += 1;
+                assert!(spins < 8, "decoder stopped consuming input");
+                match decoder.decode(&mut src).unwrap() {
+                    Some(text) => out.push(text),
+                    None => break,
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn empty_chunk_returns_none() {
+        let mut decoder = StringDecoder::new();
+        let mut src = BytesMut::new();
+        assert!(decoder.decode(&mut src).unwrap().is_none());
+    }
+
+    #[test]
+    fn ascii_is_returned_whole() {
+        assert_eq!(decode_chunks(&[b"hi"]), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn multibyte_char_split_across_chunks() {
+        // U+00E9 LATIN SMALL LETTER E WITH ACUTE is the bytes C3 A9.
+        let joined: String = decode_chunks(&[b"caf\xc3", b"\xa9"]).concat();
+        assert_eq!(joined, "café");
+    }
+
+    #[test]
+    fn empty_chunk_between_partial_utf8_does_not_panic() {
+        let mut decoder = StringDecoder::new();
+        let mut lead = BytesMut::from(&b"\xc3"[..]);
+        assert!(decoder.decode(&mut lead).unwrap().is_none());
+
+        let mut empty = BytesMut::new();
+        assert!(decoder.decode(&mut empty).unwrap().is_none());
+
+        let mut rest = BytesMut::from(&b"\xa9"[..]);
+        assert_eq!(decoder.decode(&mut rest).unwrap().as_deref(), Some("é"));
+    }
+
+    #[test]
+    fn invalid_byte_is_held_until_the_next_decode() {
+        // One invalid byte is not enough to emit a replacement. The following
+        // ASCII byte stays in the buffer and is emitted, with the replacement,
+        // on the next decode call. That matches how FramedRead waits for more
+        // input after `decode` returns None.
+        let mut decoder = StringDecoder::new();
+        let mut src = BytesMut::from(&b"\xffA"[..]);
+        assert!(decoder.decode(&mut src).unwrap().is_none());
+        assert_eq!(&src[..], b"A");
+        assert_eq!(
+            decoder.decode(&mut src).unwrap().as_deref(),
+            Some("\u{FFFD}A")
+        );
     }
 }
