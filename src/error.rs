@@ -41,3 +41,42 @@ impl fmt::Display for ProgramError {
     }
 }
 pub type Result<T> = std::result::Result<T, ProgramError>;
+
+#[cfg(test)]
+mod tests {
+    use super::ProgramError;
+
+    #[test]
+    fn messages_name_the_failure() {
+        assert_eq!(
+            ProgramError::NoPortFound.to_string(),
+            "No USB serial adapter found which matches criteria."
+        );
+        assert_eq!(
+            ProgramError::UnableToOpen("COM1".to_string(), std::io::Error::other("busy"))
+                .to_string(),
+            "Unable to open serial port 'COM1': busy"
+        );
+        assert_eq!(
+            ProgramError::IoError(std::io::Error::other("disk")).to_string(),
+            "disk"
+        );
+        assert_eq!(
+            ProgramError::SerialPortError(mio_serial::Error::new(
+                mio_serial::ErrorKind::Unknown,
+                "boom"
+            ))
+            .to_string(),
+            "SerialPortError: boom"
+        );
+    }
+
+    #[test]
+    fn io_and_serial_errors_convert_into_program_errors() {
+        let io_err: ProgramError = std::io::Error::other("disk").into();
+        assert_eq!(io_err.to_string(), "disk");
+        let serial: ProgramError =
+            mio_serial::Error::new(mio_serial::ErrorKind::NoDevice, "none").into();
+        assert_eq!(serial.to_string(), "SerialPortError: none");
+    }
+}
