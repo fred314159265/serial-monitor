@@ -1,7 +1,7 @@
 #![recursion_limit = "256"] // Needed for select!
 
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use futures::{future::FutureExt, select, StreamExt};
@@ -208,17 +208,20 @@ fn exit_char(opt: &Opt) -> char {
     }
 }
 
-// Returns the Event::Key variant of the exit character which will
-// cause the serial monitor to exit.
-fn exit_code(opt: &Opt) -> Event {
-    Event::Key(KeyEvent::new(
-        KeyCode::Char(exit_char(opt)),
-        KeyModifiers::CONTROL,
-    ))
-}
-
 fn is_exit_event(event: &Event, opt: &Opt) -> bool {
-    event == &exit_code(opt)
+    // Letter case and lock-key state are not part of the chord. A release is
+    // not an exit: crossterm reports both edges, and only the press should stop.
+    match event {
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            match key.code {
+                KeyCode::Char(ch) => ch.eq_ignore_ascii_case(&exit_char(opt)),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 // Returns a human readable string of the exit character.
@@ -262,52 +265,70 @@ fn hex_str(bytes: &[u8]) -> String {
     hex
 }
 
-// Checks to see if a string matches a pattern used for filtering.
-fn matches(str: &str, pattern: Option<&str>, opt: &Opt) -> bool {
+fn has_wildcard(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?')
+}
+
+// A port name is exact unless the user wrote `*` or `?`, and the compare is
+// case-sensitive. `COM1` must not select `COM10`.
+fn port_name_matches(name: &str, pattern: Option<&str>, opt: &Opt) -> bool {
     let result = match pattern {
-        Some(pattern) => {
-            if pattern.contains('*') || pattern.contains('?') {
-                // If any wildcards are present, then we assume that the
-                // pattern is fully specified
-                WildMatch::new(pattern).matches(str)
-            } else {
-                // Since no wildcard were specified we treat it as if there
-                // was a '*' at each end.
-                WildMatch::new(&format!("*{}*", pattern)).matches(str)
-            }
-        }
-        None => {
-            // If no pattern is specified, then we consider that
-            // a match has taken place.
-            true
-        }
+        None => true,
+        Some(pattern) if has_wildcard(pattern) => WildMatch::new(pattern).matches(name),
+        Some(pattern) => name == pattern,
     };
     if opt.debug {
         println!(
-            "matches(str:{:?}, pattern:{:?}) -> {:?}",
-            str, pattern, result
+            "port(name:{:?}, pattern:{:?}) -> {:?}",
+            name, pattern, result
         );
     }
     result
 }
 
-// Similar to matches but checks to see if an Option<String> matches a pattern.
-fn matches_opt(str: Option<String>, pattern: Option<&str>, opt: &Opt) -> bool {
-    if let Some(str) = str {
-        matches(&str, pattern, opt)
-    } else {
-        // If no pattern was specified, then we don't care if there was a string
-        // supplied or not. But if we're looking for a particular patterm, then
-        // it needs to match.
-        let result = pattern.is_none();
-        if opt.debug {
-            println!(
-                "matches_opt(str:{:?}, pattern:{:?}) -> {:?}",
-                str, pattern, result
-            );
+// Manufacturer, product, and serial are case-insensitive. Without a wildcard
+// the pattern may match the middle of the field.
+fn text_matches(value: Option<&str>, pattern: Option<&str>, opt: &Opt) -> bool {
+    let result = match (value, pattern) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(value), Some(pattern)) if has_wildcard(pattern) => {
+            WildMatch::new(&pattern.to_lowercase()).matches(&value.to_lowercase())
         }
-        result
+        (Some(value), Some(pattern)) => value.to_lowercase().contains(&pattern.to_lowercase()),
+    };
+    if opt.debug {
+        println!(
+            "text(value:{:?}, pattern:{:?}) -> {:?}",
+            value, pattern, result
+        );
     }
+    result
+}
+
+// VID and PID are 16-bit hex. `f055`, `F055`, and `0xf055` are the same value.
+// `055` is a different value. A pattern with `*` or `?` is a case-insensitive
+// glob on the 4-digit lowercase hex.
+fn id_matches(id: u16, pattern: Option<&str>, opt: &Opt) -> bool {
+    let rendered = format!("{:04x}", id);
+    let result = match pattern {
+        None => true,
+        Some(pattern) => {
+            let hex = pattern
+                .strip_prefix("0x")
+                .or_else(|| pattern.strip_prefix("0X"))
+                .unwrap_or(pattern);
+            if has_wildcard(hex) {
+                WildMatch::new(&hex.to_lowercase()).matches(&rendered)
+            } else {
+                u16::from_str_radix(hex, 16).ok() == Some(id)
+            }
+        }
+    };
+    if opt.debug {
+        println!("id(id:{}, pattern:{:?}) -> {:?}", rendered, pattern, result);
+    }
+    result
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -343,26 +364,71 @@ fn available_ports() -> Result<Vec<SerialPortInfo>> {
     Ok(mio_serial::available_ports()?)
 }
 
+fn requested_port_name(opt: &Opt) -> Option<String> {
+    let name = {
+        #[cfg(target_family = "unix")]
+        {
+            opt.port.as_deref().map(get_port_path)
+        }
+        #[cfg(not(target_family = "unix"))]
+        {
+            opt.port.clone()
+        }
+    };
+    // macOS enumeration rewrites /dev/tty.* to /dev/cu.*. Apply the same
+    // rewrite to the name the user typed so the two can be equal.
+    #[cfg(target_os = "macos")]
+    {
+        name.map(|name| map_port_name(&name))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        name
+    }
+}
+
+fn listed_port_name(port_name: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        map_port_name(port_name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        port_name.to_owned()
+    }
+}
+
 // Checks to see if a serial port matches the filtering criteria specified on the command line.
 fn usb_port_matches(port: &SerialPortInfo, opt: &Opt) -> bool {
-    #[cfg(target_family = "unix")]
-    // Handle symlinks if on unix.
-    let user_port_name = opt.port.as_deref().map(get_port_path);
-    #[cfg(not(target_family = "unix"))]
-    let user_port_name = opt.port.clone();
+    let user_port_name = requested_port_name(opt);
+    let listed_name = listed_port_name(&port.port_name);
+    let name_ok = port_name_matches(&listed_name, user_port_name.as_deref(), opt);
 
-    if let SerialPortType::UsbPort(info) = &port.port_type {
-        if matches(&port.port_name, user_port_name.as_deref(), opt)
-            && matches(&format!("{:04x}", info.vid), opt.vid.as_deref(), opt)
-            && matches(&format!("{:04x}", info.pid), opt.pid.as_deref(), opt)
-            && matches_opt(info.manufacturer.clone(), opt.manufacturer.as_deref(), opt)
-            && matches_opt(info.serial_number.clone(), opt.serial.as_deref(), opt)
-            && matches_opt(info.product.clone(), opt.product.as_deref(), opt)
-        {
-            return true;
+    match &port.port_type {
+        SerialPortType::UsbPort(info) => {
+            name_ok
+                && id_matches(info.vid, opt.vid.as_deref(), opt)
+                && id_matches(info.pid, opt.pid.as_deref(), opt)
+                && text_matches(
+                    info.manufacturer.as_deref(),
+                    opt.manufacturer.as_deref(),
+                    opt,
+                )
+                && text_matches(info.serial_number.as_deref(), opt.serial.as_deref(), opt)
+                && text_matches(info.product.as_deref(), opt.product.as_deref(), opt)
+        }
+        // PCI, Bluetooth, and unknown ports have no USB ids. They stay hidden
+        // until the user names one with --port, and a USB-only filter excludes them.
+        _ => {
+            opt.port.is_some()
+                && name_ok
+                && opt.vid.is_none()
+                && opt.pid.is_none()
+                && opt.manufacturer.is_none()
+                && opt.serial.is_none()
+                && opt.product.is_none()
         }
     }
-    false
 }
 
 /// Get the destination of a symlink if the port name is indeed a path to a symlink.
@@ -373,10 +439,16 @@ fn get_port_path(port_name: &str) -> String {
     let port_path = std::path::PathBuf::from(port_name);
     if let (true, Ok(link_target)) = (port_path.is_symlink(), std::fs::read_link(&port_path)) {
         if link_target.is_relative() {
-            if let Ok(new_path) = port_path.parent().unwrap().join(link_target).canonicalize() {
-                return new_path.to_string_lossy().to_string();
+            // A broken relative link has nothing to open, so keep the path the
+            // user typed. canonicalize follows a chain when the final target exists.
+            let joined = port_path.parent().unwrap().join(link_target);
+            if let Ok(resolved) = joined.canonicalize() {
+                return resolved.to_string_lossy().to_string();
             }
+        } else if let Ok(resolved) = link_target.canonicalize() {
+            return resolved.to_string_lossy().to_string();
         } else {
+            // An absolute link to a missing target returns that target.
             return link_target.to_string_lossy().to_string();
         }
     }
@@ -392,7 +464,7 @@ fn select_ports(ports: Vec<SerialPortInfo>, opt: &Opt) -> Result<Vec<SerialPortI
         .into_iter()
         .filter(|info| usb_port_matches(info, opt))
         .collect();
-    ports.sort_by(|a, b| a.port_name.cmp(&b.port_name));
+    ports.sort_by(|a, b| natural_cmp(&a.port_name, &b.port_name));
     if let Some(index) = opt.index {
         if index < ports.len() {
             Ok(vec![ports[index].clone()])
@@ -456,11 +528,79 @@ fn find_port(opt: &Opt) -> Result<String> {
     Ok(filtered_port(opt)?.port_name)
 }
 
+// Compare port names so trailing numbers sort by value: COM1, COM2, COM10.
+fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+    loop {
+        match (left_chars.peek().copied(), right_chars.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left_ch), Some(right_ch))
+                if left_ch.is_ascii_digit() && right_ch.is_ascii_digit() =>
+            {
+                let left_run = take_digits(&mut left_chars);
+                let right_run = take_digits(&mut right_chars);
+                match cmp_digit_run(&left_run, &right_run) {
+                    std::cmp::Ordering::Equal => {}
+                    order => return order,
+                }
+            }
+            (Some(left_ch), Some(right_ch)) => match left_ch.cmp(&right_ch) {
+                std::cmp::Ordering::Equal => {
+                    left_chars.next();
+                    right_chars.next();
+                }
+                order => return order,
+            },
+        }
+    }
+}
+
+fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut digits = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        digits.push(ch);
+        chars.next();
+    }
+    digits
+}
+
+fn cmp_digit_run(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left.trim_start_matches('0');
+    let right = right.trim_start_matches('0');
+    let left = if left.is_empty() { "0" } else { left };
+    let right = if right.is_empty() { "0" } else { right };
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+// The byte produced by Ctrl together with an ASCII key, when that key is a
+// control. Digits other than 4 through 7 are not controls: crossterm uses
+// those four to report 0x1c through 0x1f.
+fn control_byte(ch: char) -> Option<u8> {
+    if ch.is_ascii_alphabetic() || ch == ' ' || ('@'..='_').contains(&ch) {
+        Some((ch as u8) & 0x1f)
+    } else if ('4'..='7').contains(&ch) {
+        Some(((ch as u8) + 8) & 0x1f)
+    } else {
+        None
+    }
+}
+
 // Converts key events from crossterm into appropriate character/escape sequences which are then
 // sent over the serial connection.
 fn handle_key_event(key_event: KeyEvent, opt: &Opt) -> Result<Option<Bytes>> {
     if opt.debug {
         println!("Event::{:?}\r", key_event);
+    }
+    // Windows crossterm delivers Press and Release for every key. The release
+    // is not another press.
+    if key_event.kind == KeyEventKind::Release {
+        return Ok(None);
     }
 
     // The following escape sequeces come from the MicroPython codebase.
@@ -490,14 +630,9 @@ fn handle_key_event(key_event: KeyEvent, opt: &Opt) -> Result<Option<Bytes>> {
         KeyCode::Insert => Some(b"\x1b[2~"),
         KeyCode::Esc => Some(b"\x1b"),
         KeyCode::Char(ch) => {
-            if key_event.modifiers & KeyModifiers::CONTROL == KeyModifiers::CONTROL {
-                buf[0] = ch as u8;
-                if ch.is_ascii_lowercase() || (ch == ' ') {
-                    buf[0] &= 0x1f;
-                    Some(&buf[0..1])
-                } else if ('4'..='7').contains(&ch) {
-                    // crossterm returns Control-4 thru 7 for \x1c thru \x1f
-                    buf[0] = (buf[0] + 8) & 0x1f;
+            if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some(byte) = control_byte(ch) {
+                    buf[0] = byte;
                     Some(&buf[0..1])
                 } else {
                     Some(ch.encode_utf8(&mut buf).as_bytes())

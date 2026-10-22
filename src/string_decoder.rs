@@ -3,18 +3,16 @@ use std::{char, str};
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::Decoder;
 
-/// A lossy string decoder that replaces unrecognized characters with [`REPLACEMENT_CHAR`](std::char::REPLACEMENT_CHAR).
-pub struct StringDecoder {
-    /// An incomplete `char` value being decoded from the stream.
-    /// `char`s are always four bytes in length.
-    incomplete: (usize, [u8; 4]),
-}
+/// A lossy string decoder that replaces unrecognized characters with [`REPLACEMENT_CHARACTER`](char::REPLACEMENT_CHARACTER).
+///
+/// Incomplete UTF-8 stays in `src`. `Ok(None)` means the caller must read more
+/// bytes. `FramedRead` will not call `decode` again until that read happens,
+/// so every complete character already buffered is returned first.
+pub struct StringDecoder;
 
 impl StringDecoder {
     pub const fn new() -> StringDecoder {
-        StringDecoder {
-            incomplete: (0, [0; 4]),
-        }
+        StringDecoder
     }
 }
 
@@ -23,87 +21,52 @@ impl Decoder for StringDecoder {
     type Item = String;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.is_empty() {
-            return Ok(None);
+        let mut out = String::new();
+        loop {
+            if src.is_empty() {
+                break;
+            }
+            let (valid_up_to, error_len) = match str::from_utf8(src) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    src.clear();
+                    break;
+                }
+                Err(err) => (err.valid_up_to(), err.error_len()),
+            };
+            if valid_up_to > 0 {
+                let bytes = src.split_to(valid_up_to);
+                out.push_str(str::from_utf8(&bytes).expect("valid_up_to is valid UTF-8"));
+                continue;
+            }
+            match error_len {
+                Some(len) if len > 0 && len <= src.len() => {
+                    let _invalid = src.split_to(len);
+                    out.push(char::REPLACEMENT_CHARACTER);
+                }
+                // A lead byte with no continuation yet, or a zero length that
+                // would otherwise spin. Leave those bytes for the next read.
+                _ => break,
+            }
         }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
 
-        match str::from_utf8(src) {
-            Err(err) if err.valid_up_to() > 0 => {
-                // Split the bytes that are valid utf8 and turn it into &str.
-                let split_bytes = src.split_to(err.valid_up_to());
-                let valid_str = unsafe { str::from_utf8_unchecked(&split_bytes) };
-
-                let (ref mut index, _) = self.incomplete;
-                if *index > 0 {
-                    // We have a partial character stored, but decoded a valid string
-                    // after it, this means that this partial character cannot be
-                    // completed so we replace it with a `REPLACEMENT_CHARACTER`.
-                    let mut result = String::with_capacity(
-                        valid_str.len() + char::REPLACEMENT_CHARACTER.len_utf8(),
-                    );
-                    result.push(char::REPLACEMENT_CHARACTER);
-                    result.push_str(valid_str);
-                    // Reset the incomplete index
-                    *index = 0;
-
-                    Ok(Some(result))
-                } else {
-                    Ok(Some(valid_str.to_owned()))
-                }
-            }
-            Err(_) => {
-                let (ref mut index, ref mut buf) = self.incomplete;
-
-                // Index is always less than 4, because of below.
-                // `split_to(1)` panics when `src` is empty, and indexing the
-                // result panics if that split is empty. Upstream's
-                // `.get(0).unwrap_or_default()` does not compile: `get` yields
-                // `&u8`, which has no `Default`.
-                if src.is_empty() {
-                    return Ok(None);
-                }
-                buf[*index] = src.split_to(1)[0];
-                *index += 1;
-
-                // Check if char is valid
-                if let Ok(s) = str::from_utf8(&buf[..*index]) {
-                    // If valid turn it into string and return it.
-                    let result = s.to_string();
-                    // Reset index of `incomplete` because we've taken it.
-                    *index = 0;
-
-                    Ok(Some(result))
-                } else if *index == 4 {
-                    // Char is not valid, but the buffer is full, so return a
-                    // replacement char.
-                    *index = 0;
-                    Ok(Some(char::REPLACEMENT_CHARACTER.to_string()))
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(_) => {
-                // Split the bytes used for `s`.
-                let split_bytes = src.split();
-                let s = unsafe { str::from_utf8_unchecked(&split_bytes) };
-
-                let (ref mut index, _) = self.incomplete;
-                if *index > 0 {
-                    // We have a partial character stored, but decoded a valid string
-                    // after it, this means that this partial character cannot be
-                    // completed so we replace it with a `REPLACEMENT_CHARACTER`.
-                    let mut result =
-                        String::with_capacity(s.len() + char::REPLACEMENT_CHARACTER.len_utf8());
-                    result.push(char::REPLACEMENT_CHARACTER);
-                    result.push_str(s);
-                    // Reset the incomplete index
-                    *index = 0;
-
-                    Ok(Some(result))
-                } else {
-                    Ok(Some(s.to_owned()))
-                }
-            }
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let mut out = self.decode(src)?.unwrap_or_default();
+        // The device is gone, so a trailing partial character cannot be completed.
+        if !src.is_empty() {
+            src.clear();
+            out.push(char::REPLACEMENT_CHARACTER);
+        }
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
         }
     }
 }
