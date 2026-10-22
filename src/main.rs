@@ -278,7 +278,7 @@ fn port_name_matches(name: &str, pattern: Option<&str>, opt: &Opt) -> bool {
         Some(pattern) => name == pattern,
     };
     if opt.debug {
-        println!(
+        eprintln!(
             "port(name:{:?}, pattern:{:?}) -> {:?}",
             name, pattern, result
         );
@@ -298,7 +298,7 @@ fn text_matches(value: Option<&str>, pattern: Option<&str>, opt: &Opt) -> bool {
         (Some(value), Some(pattern)) => value.to_lowercase().contains(&pattern.to_lowercase()),
     };
     if opt.debug {
-        println!(
+        eprintln!(
             "text(value:{:?}, pattern:{:?}) -> {:?}",
             value, pattern, result
         );
@@ -326,7 +326,7 @@ fn id_matches(id: u16, pattern: Option<&str>, opt: &Opt) -> bool {
         }
     };
     if opt.debug {
-        println!("id(id:{}, pattern:{:?}) -> {:?}", rendered, pattern, result);
+        eprintln!("id(id:{}, pattern:{:?}) -> {:?}", rendered, pattern, result);
     }
     result
 }
@@ -595,7 +595,7 @@ fn control_byte(ch: char) -> Option<u8> {
 // sent over the serial connection.
 fn handle_key_event(key_event: KeyEvent, opt: &Opt) -> Result<Option<Bytes>> {
     if opt.debug {
-        println!("Event::{:?}\r", key_event);
+        eprintln!("Event::{:?}\r", key_event);
     }
     // Windows crossterm delivers Press and Release for every key. The release
     // is not another press.
@@ -645,7 +645,7 @@ fn handle_key_event(key_event: KeyEvent, opt: &Opt) -> Result<Option<Bytes>> {
     };
     if let Some(key_str) = key_str {
         if opt.debug {
-            println!("Send: {}\r", hex_str(key_str));
+            eprintln!("Send: {}\r", hex_str(key_str));
         }
         if opt.echo {
             if let Ok(val) = std::str::from_utf8(key_str) {
@@ -684,6 +684,30 @@ fn terminal_action(event: &Event, opt: &Opt) -> Result<TerminalAction> {
     }
 }
 
+fn serial_write_closed() -> ProgramError {
+    ProgramError::IoError(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "serial port closed while writing",
+    ))
+}
+
+fn queue_serial_write(
+    tx: &futures::channel::mpsc::UnboundedSender<Bytes>,
+    bytes: Bytes,
+) -> Result<()> {
+    tx.unbounded_send(bytes).map_err(|_| serial_write_closed())
+}
+
+// Disables raw mode on drop, including when a panic unwinds the monitor task.
+// main calls process::exit only after real_main returns, so this runs first.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
 // Main function which collects input from the user and sends it over the serial link
 // and collects serial data and presents it to the user.
 async fn monitor(port: &mut tokio_serial::SerialStream, opt: &Opt) -> Result<()> {
@@ -700,22 +724,28 @@ async fn monitor(port: &mut tokio_serial::SerialStream, opt: &Opt) -> Result<()>
         let mut serial_event = serial_reader.next().fuse();
 
         select! {
-            _ = poll_send => {}
+            send_result = poll_send => {
+                // The write side finished because the port closed. Leave the
+                // loop now: polling this future again does nothing, and the
+                // next key would otherwise panic on a closed channel.
+                return match send_result {
+                    Ok(()) => Err(serial_write_closed()),
+                    Err(err) => Err(err.into()),
+                };
+            }
             maybe_event = event => {
                 match maybe_event {
                     Some(Ok(event)) => match terminal_action(&event, opt)? {
                         TerminalAction::Exit => break,
-                        TerminalAction::Send(key) => {
-                            serial_writer.unbounded_send(key).unwrap();
-                        }
+                        TerminalAction::Send(key) => queue_serial_write(&serial_writer, key)?,
                         TerminalAction::Ignore => {}
                         TerminalAction::Unrecognized => {
-                            println!("Unrecognized Event::{:?}\r", event);
+                            eprintln!("Unrecognized Event::{:?}\r", event);
                         }
                     },
-                    Some(Err(e)) => println!("crossterm Error: {:?}\r", e),
+                    Some(Err(e)) => eprintln!("crossterm Error: {:?}\r", e),
                     None => {
-                        println!("maybe_event returned None\r");
+                        eprintln!("maybe_event returned None\r");
                     },
                 }
             },
@@ -723,19 +753,16 @@ async fn monitor(port: &mut tokio_serial::SerialStream, opt: &Opt) -> Result<()>
                 match maybe_serial {
                     Some(Ok(serial_event)) => {
                         if opt.debug {
-                            println!("Serial Event:{:?}\r", serial_event);
+                            eprintln!("Serial Event:{:?}\r", serial_event);
                         } else {
                             print!("{}", serial_event);
                             std::io::stdout().flush()?;
                         }
                     },
-                    Some(Err(e)) => {
-                        println!("Serial Error: {:?}\r", e);
-                        // This most likely means that the serial port has been unplugged.
-                        break;
-                    },
+                    // The port is gone. Report it after raw mode is restored.
+                    Some(Err(e)) => return Err(e),
                     None => {
-                        println!("maybe_serial returned None\r");
+                        eprintln!("maybe_serial returned None\r");
                     },
                 }
             },
@@ -817,7 +844,7 @@ async fn real_main() -> Result<()> {
     let opt = Opt::from_args();
 
     if opt.verbose {
-        println!("{:#?}", opt);
+        eprintln!("{:#?}", opt);
     }
 
     match startup_action(&opt) {
@@ -846,12 +873,14 @@ async fn real_main() -> Result<()> {
     let mut port = tokio_serial::SerialStream::open(&port_builder)
         .map_err(|e| ProgramError::UnableToOpen(err_port_name, e.into()))?;
 
-    println!("Connected to {}", port_name);
-    println!("Press {} to exit", exit_label(&opt));
+    eprintln!("Connected to {}", port_name);
+    eprintln!("Press {} to exit", exit_label(&opt));
     enable_raw_mode()?;
-    let result = monitor(&mut port, &opt).await;
-    disable_raw_mode()?;
-    println!();
+    let result = {
+        let _raw = RawModeGuard;
+        monitor(&mut port, &opt).await
+    };
+    eprintln!();
     result
 }
 
@@ -861,14 +890,16 @@ mod tests {
     use super::get_port_path;
     use super::{
         exit_label, exit_report, handle_key_event, hex_str, is_exit_event, map_port_name,
-        port_line, port_settings, select_ports, startup_action, terminal_action, usb_port_matches,
-        Eol, FlowControlOpt, Opt, ParityOpt, ProgramError, StartupAction, TerminalAction,
+        port_line, port_settings, queue_serial_write, select_ports, startup_action,
+        terminal_action, usb_port_matches, Eol, FlowControlOpt, Opt, ParityOpt, ProgramError,
+        StartupAction, TerminalAction,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use mio_serial::SerialPortInfo;
     use serialport::{SerialPortType, UsbPortInfo};
     use structopt::StructOpt;
     use tokio_serial::{DataBits, FlowControl, Parity, StopBits};
+    use tokio_util::bytes::Bytes;
 
     // These tests specify the behavior we want. Some fail until the program
     // matches that behavior. Do not change an assertion to match the current code.
@@ -1772,5 +1803,13 @@ mod tests {
         let mut opt = bare();
         opt.vid = Some("F*".to_string());
         assert!(usb_port_matches(&port, &opt));
+    }
+
+    #[test]
+    fn write_to_a_closed_port_is_an_error() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        drop(rx);
+        let err = queue_serial_write(&tx, Bytes::from_static(b"a")).unwrap_err();
+        assert_eq!(err.to_string(), "serial port closed while writing");
     }
 }
