@@ -15,13 +15,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = { version = "0.3" }
-mio-serial = "5.0"
-serialport = "4.5"
-structopt = "0.3"
-tokio = { version = "1.16.1", features = ["full"] }
+mio-serial = "5.0.7"
+serialport = "4.10"
+tokio = { version = "1.44.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tokio-serial = "5.4"
-wildmatch = "2.3"
-strum = { version = "0.26", features = ["derive"] }
+tokio-serial = "5.5"
+wildmatch = "2.7"
