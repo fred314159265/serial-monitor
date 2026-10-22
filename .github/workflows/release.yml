@@ -100,7 +100,13 @@ jobs:
             cp LICENSE "$stage/LICENSE"
             if [ "$RUNNER_OS" = "Windows" ]; then
               cp "${bin}.exe" "$stage/serial-monitor.exe"
-              tar -C "$stage" -a -cf "dist/serial-monitor-${RELEASE_CHANNEL}-${target}.${ext}" serial-monitor.exe LICENSE
+              # Git Bash tar is GNU tar. With -a it does not treat a .zip suffix as
+              # zip, so the archive is ustar and Windows cannot open it. System tar
+              # is bsdtar, which writes a real zip for that suffix.
+              archive="dist/serial-monitor-${RELEASE_CHANNEL}-${target}.${ext}"
+              "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -C "$stage" -a -cf "$archive" serial-monitor.exe LICENSE
+              sig=$(head -c 2 "$archive")
+              test "$sig" = "PK"
             else
               cp "$bin" "$stage/serial-monitor"
               tar -C "$stage" -czf "dist/serial-monitor-${RELEASE_CHANNEL}-${target}.tar.gz" serial-monitor LICENSE
