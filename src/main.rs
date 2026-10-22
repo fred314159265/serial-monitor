@@ -1,5 +1,6 @@
 #![recursion_limit = "256"] // Needed for select!
 
+use clap::{Parser, ValueEnum};
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -11,7 +12,6 @@ use std::convert::TryFrom;
 use std::io;
 use std::io::Write;
 use std::result::Result as StdResult;
-use structopt::StructOpt;
 use tokio_serial::{DataBits, FlowControl, Parity, StopBits};
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::BytesCodec;
@@ -22,84 +22,84 @@ mod string_decoder;
 use error::{ProgramError, Result};
 use string_decoder::StringDecoder;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "serial-monitor")]
+#[derive(Parser, Debug)]
+#[command(name = "serial-monitor", version, about, long_about = None)]
 struct Opt {
     /// Filter based on name of port
-    #[structopt(short, long)]
+    #[arg(short, long)]
     port: Option<String>,
 
     /// Baud rate to use
-    #[structopt(short, long, default_value = "115200")]
+    #[arg(short, long, default_value = "115200")]
     baud: u32,
 
     /// Turn on debugging
-    #[structopt(short, long)]
+    #[arg(short, long)]
     debug: bool,
 
     // Turn on local echo
-    #[structopt(short, long)]
+    #[arg(short, long)]
     echo: bool,
 
     /// List USB serial devices which are currently connected
-    #[structopt(short, long)]
+    #[arg(short, long)]
     list: bool,
 
     /// Enter character to send (cr, lf, crlf)
-    #[structopt(long, default_value = "cr")]
+    #[arg(long, value_enum, ignore_case = false, default_value = "cr")]
     enter: Eol,
 
     /// Like list, but only prints the name of the port that was found.
     /// This is useful for using from scripts or makefiles.
-    #[structopt(short, long)]
+    #[arg(short, long)]
     find: bool,
 
     /// Turn on verbose messages
-    #[structopt(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 
     /// Exit using Control-Y rather than Control-X
-    #[structopt(short = "y")]
+    #[arg(short = 'y')]
     ctrl_y_exit: bool,
 
     /// Filter based on Vendor ID (VID)
-    #[structopt(long)]
+    #[arg(long)]
     vid: Option<String>,
 
     /// Filter based on Product ID (PID)
-    #[structopt(long)]
+    #[arg(long)]
     pid: Option<String>,
 
     /// Filter based on manufacturer name
-    #[structopt(short, long)]
+    #[arg(short, long)]
     manufacturer: Option<String>,
 
     /// Filter based on serial number
-    #[structopt(short, long)]
+    #[arg(short, long)]
     serial: Option<String>,
 
     /// Filter based on product name
-    #[structopt(long)]
+    #[arg(long)]
     product: Option<String>,
 
     /// Return the index'th result
-    #[structopt(long)]
+    #[arg(long)]
     index: Option<usize>,
 
     /// Parity checking (none, odd, even)
-    #[structopt(long, default_value = "none")]
+    #[arg(long, value_enum, ignore_case = false, default_value = "none")]
     parity: ParityOpt,
 
     /// Stop bits (1, 2)
-    #[structopt(long, default_value = "1")]
+    #[arg(long, default_value = "1")]
     stopbits: usize,
 
     /// Flow control (none, software, hardware)
-    #[structopt(long, default_value = "none")]
+    #[arg(long, value_enum, ignore_case = false, default_value = "none")]
     flow: FlowControlOpt,
 
     /// Data bits (5, 6, 7, 8)
-    #[structopt(long, default_value = "8")]
+    #[arg(long, default_value = "8")]
     databits: usize,
 }
 
@@ -120,8 +120,8 @@ impl TryFrom<usize> for DataBitsOpt {
 }
 
 /// Flow control modes
-#[derive(Clone, Copy, Debug, StructOpt, strum::EnumString, strum::VariantNames)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
 enum FlowControlOpt {
     /// No flow control.
     None,
@@ -141,8 +141,8 @@ impl From<FlowControlOpt> for FlowControl {
     }
 }
 
-#[derive(Clone, Copy, Debug, StructOpt, strum::EnumString, strum::VariantNames)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
 enum ParityOpt {
     /// No parity bit.
     None,
@@ -177,8 +177,8 @@ impl TryFrom<usize> for StopBitsOpt {
 }
 
 /// End of line character options
-#[derive(Debug, StructOpt, strum::EnumString, strum::VariantNames)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
 enum Eol {
     /// Carriage return
     Cr,
@@ -841,7 +841,7 @@ fn port_settings(opt: &Opt) -> Result<PortSettings> {
 }
 
 async fn real_main() -> Result<()> {
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     if opt.verbose {
         eprintln!("{:#?}", opt);
@@ -894,10 +894,10 @@ mod tests {
         terminal_action, usb_port_matches, Eol, FlowControlOpt, Opt, ParityOpt, ProgramError,
         StartupAction, TerminalAction,
     };
+    use clap::Parser;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use mio_serial::SerialPortInfo;
     use serialport::{SerialPortType, UsbPortInfo};
-    use structopt::StructOpt;
     use tokio_serial::{DataBits, FlowControl, Parity, StopBits};
     use tokio_util::bytes::Bytes;
 
@@ -1612,7 +1612,7 @@ mod tests {
 
     #[test]
     fn command_line_defaults_and_overrides() {
-        let opt = Opt::from_iter_safe(["serial-monitor"]).unwrap();
+        let opt = Opt::try_parse_from(["serial-monitor"]).unwrap();
         assert_eq!(opt.baud, 115200);
         assert_eq!(opt.databits, 8);
         assert_eq!(opt.stopbits, 1);
@@ -1621,7 +1621,7 @@ mod tests {
         assert!(!opt.ctrl_y_exit);
         assert!(opt.port.is_none() && opt.vid.is_none() && opt.index.is_none());
 
-        let opt = Opt::from_iter_safe([
+        let opt = Opt::try_parse_from([
             "serial-monitor",
             "--port",
             "COM4",
@@ -1675,11 +1675,13 @@ mod tests {
 
     #[test]
     fn command_line_rejects_unknown_values() {
-        assert!(Opt::from_iter_safe(["serial-monitor", "--enter", "nope"]).is_err());
-        assert!(Opt::from_iter_safe(["serial-monitor", "--parity", "mark"]).is_err());
-        assert!(Opt::from_iter_safe(["serial-monitor", "--flow", "rts"]).is_err());
-        assert!(Opt::from_iter_safe(["serial-monitor", "--baud", "fast"]).is_err());
-        assert!(Opt::from_iter_safe(["serial-monitor", "--not-a-flag"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--enter", "nope"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--enter", "CRLF"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--parity", "mark"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--parity", "ODD"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--flow", "rts"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--baud", "fast"]).is_err());
+        assert!(Opt::try_parse_from(["serial-monitor", "--not-a-flag"]).is_err());
     }
 
     #[test]
@@ -1745,7 +1747,7 @@ mod tests {
 
     #[test]
     fn command_line_accepts_crlf_even_and_software_flow() {
-        let opt = Opt::from_iter_safe([
+        let opt = Opt::try_parse_from([
             "serial-monitor",
             "--enter",
             "crlf",
