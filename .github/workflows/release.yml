@@ -173,13 +173,17 @@ jobs:
             The Linux archive needs `libudev.so.1` at runtime. The binaries are unsigned.
 
             Verify a download with `sha256sum -c SHA256SUMS` and `gh attestation verify <file> --repo ${{ github.repository }}`.
+      - name: Record build time
+        id: built
+        if: github.ref_type == 'branch'
+        run: echo "at=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
       - name: Publish nightly release
         if: github.ref_type == 'branch'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: nightly
           target_commitish: ${{ github.sha }}
-          name: nightly
+          name: nightly (built ${{ steps.built.outputs.at }})
           prerelease: true
           make_latest: "false"
           overwrite_files: true
@@ -188,6 +192,8 @@ jobs:
             archives/serial-monitor-*
             archives/SHA256SUMS
           body: |
+            Built on ${{ steps.built.outputs.at }}.
+
             Nightly build from `master` at `${{ github.sha }}`.
 
             This release is replaced on every push to `master`. `serial-monitor --version` prints the version in Cargo.toml. It is not a version number for this rolling release.
