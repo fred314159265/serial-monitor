@@ -664,7 +664,6 @@ enum TerminalAction {
     Exit,
     Send(Bytes),
     Ignore,
-    Unrecognized,
 }
 
 fn terminal_action(event: &Event, opt: &Opt) -> Result<TerminalAction> {
@@ -679,8 +678,14 @@ fn terminal_action(event: &Event, opt: &Opt) -> Result<TerminalAction> {
                 Ok(TerminalAction::Ignore)
             }
         }
-        Event::Resize(_, _) => Ok(TerminalAction::Ignore),
-        _ => Ok(TerminalAction::Unrecognized),
+        // Focus, resize, mouse, and bracketed paste are not device input.
+        // A normal paste arrives as key presses and is sent above.
+        _ => {
+            if opt.debug {
+                eprintln!("Event::{:?}\r", event);
+            }
+            Ok(TerminalAction::Ignore)
+        }
     }
 }
 
@@ -739,9 +744,6 @@ async fn monitor(port: &mut tokio_serial::SerialStream, opt: &Opt) -> Result<()>
                         TerminalAction::Exit => break,
                         TerminalAction::Send(key) => queue_serial_write(&serial_writer, key)?,
                         TerminalAction::Ignore => {}
-                        TerminalAction::Unrecognized => {
-                            eprintln!("Unrecognized Event::{:?}\r", event);
-                        }
                     },
                     Some(Err(e)) => eprintln!("crossterm Error: {:?}\r", e),
                     None => {
@@ -895,7 +897,10 @@ mod tests {
         StartupAction, TerminalAction,
     };
     use clap::Parser;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
+    };
     use mio_serial::SerialPortInfo;
     use serialport::{SerialPortType, UsbPortInfo};
     use tokio_serial::{DataBits, FlowControl, Parity, StopBits};
@@ -1735,14 +1740,41 @@ mod tests {
             other => panic!("expected send, got {:?}", other),
         }
 
-        assert!(matches!(
-            terminal_action(&Event::Resize(80, 24), &opt).unwrap(),
-            TerminalAction::Ignore
-        ));
-        assert!(matches!(
-            terminal_action(&Event::FocusGained, &opt).unwrap(),
-            TerminalAction::Unrecognized
-        ));
+        let console_events = [
+            Event::Resize(80, 24),
+            Event::FocusGained,
+            Event::FocusLost,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Paste("line".to_string()),
+        ];
+        for event in &console_events {
+            assert!(
+                matches!(
+                    terminal_action(event, &opt).unwrap(),
+                    TerminalAction::Ignore
+                ),
+                "{:?}",
+                event
+            );
+        }
+
+        let mut debug = bare();
+        debug.debug = true;
+        for event in &console_events {
+            assert!(
+                matches!(
+                    terminal_action(event, &debug).unwrap(),
+                    TerminalAction::Ignore
+                ),
+                "{:?}",
+                event
+            );
+        }
     }
 
     #[test]
